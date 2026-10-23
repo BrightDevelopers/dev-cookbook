@@ -70,13 +70,9 @@
 
         const VIDEO_URL = ""; // REPLACE WITH A PUBLIC OR OTHERWISE REACHABLE FILE URL
         const OUTPUT_FILE = ""; // REPLACE WITH YOUR OUTPUT PATH, e.g. "/storage/sd/largevideo.mp4"
-        // Optional HTTP/HTTPS proxy. Leave empty for a direct connection.
-        // Form: "http://user:pass@host:port" (auth optional).
-        // If empty, the sample also checks HTTPS_PROXY / HTTP_PROXY in
-        // process.env (Node convention). The player's OS-level proxy
-        // (set via roNetworkConfiguration.SetProxy or the DWS) is NOT
-        // inherited by Node's http/https modules, so it must be set here
-        // or via those env vars.
+        // Optional HTTP/HTTPS proxy override, e.g. "http://user:pass@host:port".
+        // Leave empty to auto-detect the player's OS-level proxy
+        // (roNetworkConfiguration.SetProxy or the DWS), with env-var fallback.
         const PROXY_URL = "";
         const MAX_REDIRECTS = 10;
         // Keep buffers small — ~48 KB total across the three streams.
@@ -143,24 +139,44 @@
           requestAnimationFrame(render);
         }
 
+        let resolvedProxy = "";
+
+        async function initializeProxy() {
+          if (PROXY_URL) {
+            resolvedProxy = PROXY_URL;
+            return;
+          }
+
+          // Read the OS-level proxy configured via
+          // roNetworkConfiguration.SetProxy or the DWS. Reading it here
+          // means the app does not need to be told the end customer's
+          // proxy value.
+          try {
+            const Registry = require("@brightsign/registry");
+            const reg = new Registry();
+            const osProxy = await reg.read("networking", "proxy");
+            if (osProxy) {
+              resolvedProxy = osProxy;
+              return;
+            }
+          } catch (_err) {
+            // Registry unavailable or key unset. Fall through to env vars.
+          }
+
+          const env = (typeof process !== "undefined" && process.env) || {};
+          resolvedProxy =
+            env.HTTPS_PROXY ||
+            env.https_proxy ||
+            env.HTTP_PROXY ||
+            env.http_proxy ||
+            "";
+        }
+
         // Use Node's http/https — unlike fetch(), Node streams support
         // real TCP-level backpressure so the sender slows down when the
         // SD card can't keep up.  No data accumulates in memory.
         function download() {
           requestAnimationFrame(render);
-
-          function resolveProxy() {
-            if (PROXY_URL) return PROXY_URL;
-            var env =
-              (typeof process !== "undefined" && process.env) || {};
-            return (
-              env.HTTPS_PROXY ||
-              env.https_proxy ||
-              env.HTTP_PROXY ||
-              env.http_proxy ||
-              ""
-            );
-          }
 
           function proxyAuthHeader(proxy) {
             if (!proxy.username) return null;
@@ -243,7 +259,7 @@
           function doRequest(url, redirectCount) {
             redirectCount = redirectCount || 0;
             var target = new URL(url);
-            var proxyStr = resolveProxy();
+            var proxyStr = resolvedProxy;
 
             if (!proxyStr) {
               // Direct connection — original path.
@@ -337,7 +353,7 @@
           doRequest(VIDEO_URL);
         }
 
-        download();
+        initializeProxy().then(download);
       })();
     </script>
   </body>

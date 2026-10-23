@@ -34,17 +34,21 @@ Edit the constants at the top of the `<script>` section in `index.html`:
 
 - `VIDEO_URL`: The URL of the file to download
 - `OUTPUT_FILE`: The destination path on the SD card (e.g. `/storage/sd/largevideo.mp4`)
-- `PROXY_URL` (optional): HTTP proxy for outbound requests, in the form `http://user:pass@host:port`. Leave empty for a direct connection.
+- `PROXY_URL` (optional): HTTP proxy override, in the form `http://user:pass@host:port`. Leave empty to auto-detect the player's OS-level proxy (configured via `roNetworkConfiguration.SetProxy()` or the DWS). The environment variables `HTTPS_PROXY` and `HTTP_PROXY` are used as a final fallback.
 
 ## Using a Proxy
 
-If the player must reach the file server through an HTTP proxy, set `PROXY_URL` at the top of `index.html`. As a fallback the sample also reads the standard Node environment variables `HTTPS_PROXY`, `HTTP_PROXY`, `https_proxy`, and `http_proxy` (in that order).
+By default, the sample reads the player's OS-level proxy at startup via `@brightsign/registry`. Any proxy configured through `roNetworkConfiguration.SetProxy()` in BrightScript or through the DWS is picked up automatically, so the sample does not need to be told the proxy value per deployment.
+
+The resolution order is:
+
+1. The `PROXY_URL` constant in `index.html`, if set. This acts as an override for development and test cases.
+2. The OS-level proxy read from the registry.
+3. The Node environment variables `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY`, and `http_proxy`, in that order.
 
 Both HTTP and HTTPS targets are supported. For HTTPS targets the sample opens a CONNECT tunnel through the proxy and runs TLS over the tunnel, which is the same pattern that curl and every other HTTP client uses.
 
 If the proxy requires authentication, include the credentials in the URL. The sample sends them as a `Proxy-Authorization: Basic ...` header.
-
-Note on OS-level proxy: the player's OS proxy setting (configured via `roNetworkConfiguration.SetProxy()` in BrightScript, or through the DWS) is honored by the Chromium browser but is NOT inherited by Node's `http`/`https` modules. Node has no global proxy concept. Until a BrightSign JavaScript API exposes the OS proxy setting, the sample requires the proxy to be provided via `PROXY_URL` or the environment variables above.
 
 ## Steps to Set Up and Run the Application
 
@@ -69,5 +73,5 @@ Push files to the player:
 
 - **No progress shown**: Verify the player is connected to the network and the `VIDEO_URL` is reachable from the player.
 - **Slow download speed**: The download speed is limited by the slower of the network connection or the SD card write speed. This is by design — buffering faster than the SD card can write would consume memory.
-- **Download fails silently through a proxy**: Confirm `PROXY_URL` is set (or `HTTPS_PROXY`/`HTTP_PROXY` is in the process environment). See "Using a Proxy" above.
+- **Download fails silently through a proxy**: Confirm the OS-level proxy is configured on the player (via `roNetworkConfiguration.SetProxy()` or the DWS), or set `PROXY_URL` as an override. See "Using a Proxy" above.
 - **`Proxy CONNECT failed: HTTP 407`**: The proxy requires authentication. Include credentials in `PROXY_URL` as `http://user:pass@host:port`.
