@@ -62,24 +62,20 @@
     <div id="status">Initializing...</div>
     <div id="fps">FPS: --</div>
     <script>
-      (function () {
+      (async function () {
         "use strict";
 
-        const fs = require("fs");
-        const { pipeline, Transform } = require("stream");
+        const AssetPool = require("@brightsign/assetpool");
+        const AssetPoolFetcher = require("@brightsign/assetpoolfetcher");
+        const AssetPoolFiles = require("@brightsign/assetpoolfiles");
+        const NetworkStatus = require("@brightsign/networkstatus");
 
-        const VIDEO_URL = ""; // REPLACE WITH A PUBLIC OR OTHERWISE REACHABLE FILE URL
-        const OUTPUT_FILE = ""; // REPLACE WITH YOUR OUTPUT PATH, e.g. "/storage/sd/largevideo.mp4"
-        // Optional HTTP/HTTPS proxy override, e.g. "http://user:pass@host:port".
-        // Leave empty to auto-detect the player's OS-level proxy
-        // (roNetworkConfiguration.SetProxy or the DWS), with env-var fallback.
-        const PROXY_URL = "";
-        const MAX_REDIRECTS = 10;
-        // Keep buffers small — ~48 KB total across the three streams.
-        const HWM = 16 * 1024;
-        // Inactivity timeout per request.  Resets on any I/O activity, so
-        // long downloads work as long as bytes keep flowing.
-        const TIMEOUT_MS = 30 * 1000;
+        // The only settings the app owns. No proxy settings here; the
+        // player-wide proxy configured via roNetworkConfiguration.SetProxy()
+        // or the DWS is applied automatically by the fetcher.
+        const FILE_URL = ""; // REPLACE WITH A PUBLIC OR OTHERWISE REACHABLE FILE URL (https recommended)
+        const ASSET_NAME = ""; // REPLACE WITH A FILENAME, e.g. "largevideo.mp4"
+        const POOL_PATH = "SD:/pool";
 
         const progressDiv = document.getElementById("progress");
         const statusDiv = document.getElementById("status");
@@ -102,7 +98,9 @@
         let fpsLastTime = performance.now();
         let currentFps = 0;
 
-        // Decoupled render loop — runs at display frame rate, never blocks I/O.
+        // Decoupled render loop. Runs at display frame rate. Demonstrates
+        // that the main thread stays responsive while the fetcher streams
+        // bytes to the pool.
         function render(now) {
           frameCount++;
           if (now - fpsLastTime >= 1000) {
@@ -122,12 +120,10 @@
           if (finished) {
             progressDiv.textContent = "100%";
             barFill.style.width = "100%";
-            statusDiv.textContent =
-              "Complete: " + fmtSize(downloadedBytes);
             spinnerEl.style.display = "none";
             return;
           }
-          var pct = totalBytes
+          const pct = totalBytes
             ? Math.floor((downloadedBytes / totalBytes) * 100)
             : 0;
           progressDiv.textContent = pct + "%";
@@ -139,221 +135,62 @@
           requestAnimationFrame(render);
         }
 
-        let resolvedProxy = "";
+        requestAnimationFrame(render);
 
-        async function initializeProxy() {
-          if (PROXY_URL) {
-            resolvedProxy = PROXY_URL;
-            return;
-          }
+        try {
+          // Diagnostic only. The fetcher does not need this; the proxy is
+          // applied automatically. Logged here so partners can see what the
+          // OS is currently configured with.
+          const host = await new NetworkStatus().getHostStatus();
+          console.log(
+            "OS proxy: " +
+              (host.proxy || "(none)") +
+              "  bypass: " +
+              JSON.stringify(host.proxyBypass || [])
+          );
 
-          // Read the OS-level proxy configured via
-          // roNetworkConfiguration.SetProxy or the DWS. Reading it here
-          // means the app does not need to be told the end customer's
-          // proxy value.
-          try {
-            const Registry = require("@brightsign/registry");
-            const reg = new Registry();
-            const osProxy = await reg.read("networking", "proxy");
-            if (osProxy) {
-              resolvedProxy = osProxy;
-              return;
-            }
-          } catch (_err) {
-            // Registry unavailable or key unset. Fall through to env vars.
-          }
+          const pool = new AssetPool(POOL_PATH);
+          const fetcher = new AssetPoolFetcher(pool);
+          const assets = [{ name: ASSET_NAME, link: FILE_URL }];
 
-          const env = (typeof process !== "undefined" && process.env) || {};
-          resolvedProxy =
-            env.HTTPS_PROXY ||
-            env.https_proxy ||
-            env.HTTP_PROXY ||
-            env.http_proxy ||
-            "";
-        }
+          fetcher.addEventListener("progressevent", function (e) {
+            totalBytes = e.currentFileTotal || 0;
+            downloadedBytes = e.currentFileTransferred || 0;
+          });
 
-        // Use Node's http/https — unlike fetch(), Node streams support
-        // real TCP-level backpressure so the sender slows down when the
-        // SD card can't keep up.  No data accumulates in memory.
-        function download() {
-          requestAnimationFrame(render);
-
-          function proxyAuthHeader(proxy) {
-            if (!proxy.username) return null;
-            var user = decodeURIComponent(proxy.username);
-            var pass = decodeURIComponent(proxy.password || "");
-            return (
-              "Basic " + Buffer.from(user + ":" + pass).toString("base64")
+          fetcher.addEventListener("fileevent", function (e) {
+            console.log(
+              "fileevent: " +
+                e.fileName +
+                " response=" +
+                e.responseCode +
+                (e.error ? " error=" + e.error : "")
             );
-          }
-
-          function handleResponse(url, redirectCount, res) {
-            // Follow redirects (301/302/307/308)
-            if (
-              res.statusCode >= 300 &&
-              res.statusCode < 400 &&
-              res.headers.location
-            ) {
-              res.resume();
-              if (redirectCount >= MAX_REDIRECTS) {
-                errorMsg = "Too many redirects";
-                return;
-              }
-              // Resolve relative Location headers against the current URL.
-              var next = new URL(res.headers.location, url).href;
-              doRequest(next, redirectCount + 1);
-              return;
+            if (e.error) {
+              errorMsg = "File " + e.fileName + ": " + e.error;
             }
+          });
 
-            if (res.statusCode !== 200) {
-              res.resume();
-              errorMsg = "HTTP " + res.statusCode;
-              return;
-            }
+          // No "proxy" or "proxyBypassList" in the params, so the
+          // player-wide proxy and bypass list apply. The fetcher aborts
+          // and retries on stalled transfers via minimumTransferRate.
+          await fetcher.start(assets, {
+            progressInterval: 5,
+            fileRetryCount: 5,
+            minimumTransferRate: {
+              bytesPerSecond: 1024,
+              periodInSeconds: 60,
+            },
+          });
 
-            totalBytes =
-              parseInt(res.headers["content-length"], 10) || 0;
-
-            // A tiny Transform that only counts bytes — zero-copy
-            // passthrough, adds no buffering beyond its highWaterMark.
-            var meter = new Transform({
-              highWaterMark: HWM,
-              transform: function (chunk, _enc, cb) {
-                downloadedBytes += chunk.length;
-                cb(null, chunk);
-              },
-            });
-
-            var out = fs.createWriteStream(OUTPUT_FILE, {
-              highWaterMark: HWM,
-            });
-
-            // pipeline wires up backpressure (res ← meter ← out)
-            // and tears down every stream on error or completion.
-            pipeline(res, meter, out, function (err) {
-              if (err) {
-                errorMsg = err.message;
-                console.error(err);
-              } else {
-                finished = true;
-                console.log(
-                  "Download complete: " + downloadedBytes + " bytes"
-                );
-              }
-            });
-          }
-
-          function onError(err) {
-            errorMsg = err.message;
-            console.error(err);
-          }
-
-          function armTimeout(req, label) {
-            req.setTimeout(TIMEOUT_MS, function () {
-              req.destroy(
-                new Error(label + " timed out after " + TIMEOUT_MS + " ms")
-              );
-            });
-          }
-
-          function doRequest(url, redirectCount) {
-            redirectCount = redirectCount || 0;
-            var target = new URL(url);
-            var proxyStr = resolvedProxy;
-
-            if (!proxyStr) {
-              // Direct connection — original path.
-              var mod =
-                target.protocol === "https:"
-                  ? require("https")
-                  : require("http");
-              var req = mod
-                .get(url, function (res) {
-                  handleResponse(url, redirectCount, res);
-                })
-                .on("error", onError);
-              armTimeout(req, "Request");
-              return;
-            }
-
-            var proxy = new URL(proxyStr);
-            var authHdr = proxyAuthHeader(proxy);
-
-            if (target.protocol === "http:") {
-              // HTTP through a proxy: send the absolute URL as the path.
-              var http = require("http");
-              var options = {
-                host: proxy.hostname,
-                port: proxy.port || 80,
-                path: url,
-                headers: { Host: target.host },
-              };
-              if (authHdr) options.headers["Proxy-Authorization"] = authHdr;
-              var httpReq = http
-                .get(options, function (res) {
-                  handleResponse(url, redirectCount, res);
-                })
-                .on("error", onError);
-              armTimeout(httpReq, "Proxied HTTP request");
-              return;
-            }
-
-            // HTTPS through a proxy: open a CONNECT tunnel, then run
-            // TLS over the returned socket.
-            var http = require("http");
-            var https = require("https");
-            var targetPort = target.port || 443;
-            // Explicit host:port authority. target.host already brackets
-            // IPv6 hosts; target.port is empty when the default port is
-            // implicit, so add it back for the CONNECT authority-form.
-            var authority = target.port
-              ? target.host
-              : target.host + ":" + targetPort;
-
-            var connectHeaders = { Host: authority };
-            if (authHdr) connectHeaders["Proxy-Authorization"] = authHdr;
-
-            var connectReq = http.request({
-              host: proxy.hostname,
-              port: proxy.port || 80,
-              method: "CONNECT",
-              path: authority,
-              headers: connectHeaders,
-            });
-            armTimeout(connectReq, "Proxy CONNECT");
-
-            connectReq.on("connect", function (res, socket) {
-              if (res.statusCode !== 200) {
-                errorMsg = "Proxy CONNECT failed: HTTP " + res.statusCode;
-                socket.destroy();
-                return;
-              }
-              var tlsReq = https
-                .get(
-                  {
-                    host: target.hostname,
-                    port: targetPort,
-                    path: target.pathname + target.search,
-                    socket: socket,
-                    agent: false,
-                    servername: target.hostname,
-                  },
-                  function (res) {
-                    handleResponse(url, redirectCount, res);
-                  }
-                )
-                .on("error", onError);
-              armTimeout(tlsReq, "Tunneled HTTPS request");
-            });
-
-            connectReq.on("error", onError);
-            connectReq.end();
-          }
-
-          doRequest(VIDEO_URL);
+          const files = new AssetPoolFiles(pool, assets);
+          const localPath = await files.getPath(ASSET_NAME);
+          console.log("Download complete. Local path: " + localPath);
+          finished = true;
+        } catch (err) {
+          errorMsg = (err && err.message) || JSON.stringify(err);
+          console.error(err);
         }
-
-        initializeProxy().then(download);
       })();
     </script>
   </body>

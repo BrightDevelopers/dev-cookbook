@@ -5,50 +5,43 @@
 
 ## Introduction
 
-This example demonstrates how to download a large file (multi-GB) to an SD card on a memory-constrained BrightSign player without running out of memory or blocking the UI.
+This example demonstrates how to download a large file (multi-GB) to a BrightSign player's local asset pool using the native `@brightsign/assetpoolfetcher` module. The fetcher streams to disk with bounded memory, honors the player-wide proxy automatically, and surfaces progress and error events for UI feedback.
 
-The application is defined in `index.html` which uses Node.js streams via `roHtmlWidget` to download a file with true TCP-level backpressure. There is an `autorun.brs` file which tells the player to run the application.
+The application is defined in `index.html` which uses the `assetpoolfetcher` Node module via `roHtmlWidget`. The `autorun.brs` file tells the player to run the application.
 
-## Why Not Use `fetch()`?
+## Why Use `assetpoolfetcher`
 
-The browser's Fetch API does not propagate backpressure to the network layer. When downloading from a fast network connection to a slow SD card, `fetch()` will buffer the entire response body in memory — causing an OOM kill on devices with limited RAM (500 MB or less).
+`@brightsign/assetpoolfetcher` is BrightSign's native path for large asset downloads. It streams to disk with bounded memory, retries on transient failures, enforces a minimum transfer rate to detect stalled connections, and honors the player-wide proxy configured via `roNetworkConfiguration.SetProxy()` or the DWS. Partner apps do not need to configure the proxy per deployment.
 
-This example uses Node's `http`/`https` modules with `stream.pipeline()` instead. When the SD card's write buffer is full, backpressure propagates all the way back to the TCP socket, causing the sender to slow down. Memory usage stays bounded to roughly 48 KB (three stream buffers at 16 KB each) regardless of file size.
+The browser's Fetch API buffers the entire response body in memory, which causes an OOM crash on multi-GB files on memory-constrained players. Node's `http`/`https` modules can stream to disk via `stream.pipeline()`, but they do not inherit the player's OS-level proxy. `assetpoolfetcher` resolves both constraints natively.
 
 ## How It Works
 
-1. **Node.js HTTP request**: Uses `http.get()` / `https.get()` to initiate the download, which returns a native Node.js readable stream
-2. **Metering Transform stream**: A passthrough `Transform` stream counts downloaded bytes for progress reporting
-3. **`stream.pipeline()`**: Wires the response stream → meter → file write stream with automatic backpressure and error teardown
-4. **Decoupled UI rendering**: A `requestAnimationFrame` loop updates progress, a CSS progress bar, and an FPS counter independently of the download — the main thread is never blocked
-5. **Redirect handling**: Follows HTTP 3xx redirects since Node's `http.get` does not do this automatically
+1. **Asset pool and fetcher**: `index.html` creates an asset pool at a configured path, then creates a fetcher against that pool.
+2. **No proxy params passed**: The fetcher honors the player-wide proxy automatically; the app code holds no proxy settings.
+3. **Progress and file events**: The fetcher emits `progressevent` (per-file byte counts) and `fileevent` (per-file completion with response code and any error).
+4. **Resolve local path**: After completion, `AssetPoolFiles.getPath()` returns the local path to the downloaded file.
+5. **Diagnostic proxy read**: `networkstatus.getHostStatus()` returns the OS-configured proxy for logging only; the fetcher does not need it.
 
 ## Prerequisites
 
 1. **Network connection**: The BrightSign player should be connected to a network with access to the file server.
-2. **SD card**: The destination SD card should have enough free space for the downloaded file.
+2. **SD card**: The destination SD card should have enough free space. Format as exFAT to avoid FAT32 file-size limits on files larger than 4 GB.
+3. **Optional proxy**: If the deployment network requires an HTTP proxy, configure it via `roNetworkConfiguration.SetProxy()` or the DWS. The sample will use it automatically.
 
 ## Configuration
 
 Edit the constants at the top of the `<script>` section in `index.html`:
 
-- `VIDEO_URL`: The URL of the file to download
-- `OUTPUT_FILE`: The destination path on the SD card (e.g. `/storage/sd/largevideo.mp4`)
-- `PROXY_URL` (optional): HTTP proxy override, in the form `http://user:pass@host:port`. Leave empty to auto-detect the player's OS-level proxy (configured via `roNetworkConfiguration.SetProxy()` or the DWS). The environment variables `HTTPS_PROXY` and `HTTP_PROXY` are used as a final fallback.
+- `FILE_URL`: The URL of the file to download. HTTPS recommended.
+- `ASSET_NAME`: The filename to store the asset under in the pool, for example `"largevideo.mp4"`.
+- `POOL_PATH`: The on-player path for the asset pool. Default `"SD:/pool"`.
 
 ## Using a Proxy
 
-By default, the sample reads the player's OS-level proxy at startup via `@brightsign/registry`. Any proxy configured through `roNetworkConfiguration.SetProxy()` in BrightScript or through the DWS is picked up automatically, so the sample does not need to be told the proxy value per deployment.
+Configure the proxy at the player level via `roNetworkConfiguration.SetProxy()` or the DWS. The sample reads nothing from app configuration for proxy; the player-wide setting applies automatically. HTTP and HTTPS targets are both supported.
 
-The resolution order is:
-
-1. The `PROXY_URL` constant in `index.html`, if set. This acts as an override for development and test cases.
-2. The OS-level proxy read from the registry.
-3. The Node environment variables `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY`, and `http_proxy`, in that order.
-
-Both HTTP and HTTPS targets are supported. For HTTPS targets the sample opens a CONNECT tunnel through the proxy and runs TLS over the tunnel, which is the same pattern that curl and every other HTTP client uses.
-
-If the proxy requires authentication, include the credentials in the URL. The sample sends them as a `Proxy-Authorization: Basic ...` header.
+For diagnostic visibility into which proxy the OS is currently using, the sample logs the result of `networkstatus.getHostStatus()` on startup. This is for logging only and does not affect fetcher behavior.
 
 ## Steps to Set Up and Run the Application
 
@@ -71,7 +64,7 @@ Push files to the player:
 
 ## Troubleshooting
 
-- **No progress shown**: Verify the player is connected to the network and the `VIDEO_URL` is reachable from the player.
-- **Slow download speed**: The download speed is limited by the slower of the network connection or the SD card write speed. This is by design — buffering faster than the SD card can write would consume memory.
-- **Download fails silently through a proxy**: Confirm the OS-level proxy is configured on the player (via `roNetworkConfiguration.SetProxy()` or the DWS), or set `PROXY_URL` as an override. See "Using a Proxy" above.
-- **`Proxy CONNECT failed: HTTP 407`**: The proxy requires authentication. Include credentials in `PROXY_URL` as `http://user:pass@host:port`.
+- **No progress shown**: Verify the player is connected to the network and the `FILE_URL` is reachable from the player.
+- **`EFBIG: file too large` error**: The SD card is FAT32-formatted. Reformat as exFAT for files larger than 4 GB.
+- **Download fails silently through a proxy**: Confirm the OS-level proxy is configured on the player via `roNetworkConfiguration.SetProxy()` or the DWS. Confirm `networkstatus.getHostStatus()` returns the expected proxy on the diagnostic log line printed at startup.
+- **`fileevent` reports an error**: The error field surfaces on the per-file completion event. Check `e.responseCode` and the error string for cause.
